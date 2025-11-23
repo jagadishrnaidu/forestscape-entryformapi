@@ -1,5 +1,3 @@
-// ✅ Complete Forestscape Entry Form API with analytics endpoints
-
 import express from "express";
 import { google } from "googleapis";
 
@@ -9,77 +7,173 @@ const PORT = process.env.PORT || 8080;
 const SHEET_ID = process.env.SHEET_ID;
 const GOOGLE_SERVICE_KEY = process.env.GOOGLE_SERVICE_KEY;
 
-// ===================== VISITORS ENDPOINT =====================
+// Helper for Google Sheets auth
+const getSheets = async () => {
+  const auth = new google.auth.GoogleAuth({
+    credentials: JSON.parse(GOOGLE_SERVICE_KEY),
+    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+  });
+  return google.sheets({ version: "v4", auth });
+};
+
+// Helper to read rows
+const getRows = async () => {
+  const sheets = await getSheets();
+  const result = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: "'Form responses'!A:M",
+  });
+  const rows = result.data.values || [];
+  const headers = rows[0];
+  return rows.slice(1).map((r) => Object.fromEntries(r.map((v, i) => [headers[i], v])));
+};
+
+// Parse dd/MM/yyyy
+const parseDate = (timestamp) => {
+  if (!timestamp) return null;
+  const [d, m, y] = timestamp.split(/[ /]/);
+  return new Date(`${y}-${m}-${d}`);
+};
+
+// ===================== DAILY VISITORS =====================
 app.get("/visitors", async (req, res) => {
   try {
-    const auth = new google.auth.GoogleAuth({
-      credentials: JSON.parse(GOOGLE_SERVICE_KEY),
-      scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
-    });
+    const data = await getRows();
+    const now = new Date();
+    const day = now.getDate(), month = now.getMonth(), year = now.getFullYear();
 
-    const sheets = google.sheets({ version: "v4", auth });
-
-    const result = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: "'Form responses'!A:L",
-    });
-
-    const rows = result.data.values || [];
-    if (rows.length <= 1) {
-      return res.json({ message: "No data found in sheet." });
-    }
-
-    const dataRows = rows.slice(1);
-    const today = new Date();
-    const todayDay = today.getDate();
-    const todayMonth = today.getMonth() + 1;
-    const todayYear = today.getFullYear();
-
-    // Parse dd/MM/yyyy HH:mm:ss format manually
-    const total = dataRows.filter((r) => {
-      if (!r[0]) return false;
-      const parts = r[0].split("/");
-      if (parts.length < 3) return false;
-      const day = parseInt(parts[0]);
-      const month = parseInt(parts[1]);
-      const year = parseInt(parts[2].split(" ")[0]);
-      return day === todayDay && month === todayMonth && year === todayYear;
+    const todayCount = data.filter((r) => {
+      const d = parseDate(r.Timestamp);
+      return d && d.getDate() === day && d.getMonth() === month && d.getFullYear() === year;
     }).length;
 
-    res.json({ total_visitors_today: total, total_rows: dataRows.length });
-  } catch (error) {
-    console.error("Sheets API error:", error.response?.data || error.message);
-    res.status(500).json({ error: "Failed to fetch visitor data" });
+    res.json({ total_visitors_today: todayCount, total_rows: data.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to fetch today's visitors" });
   }
 });
 
-// ===================== ANALYTICS ENDPOINT =====================
+// ===================== WEEKLY VISITORS =====================
+app.get("/weekly", async (req, res) => {
+  try {
+    const data = await getRows();
+    const now = new Date();
+    const oneWeekAgo = new Date();
+    oneWeekAgo.setDate(now.getDate() - 7);
+
+    const count = data.filter((r) => {
+      const d = parseDate(r.Timestamp);
+      return d && d >= oneWeekAgo && d <= now;
+    }).length;
+
+    res.json({ total_visitors_week: count, total_rows: data.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to fetch weekly visitors" });
+  }
+});
+
+// ===================== MONTHLY VISITORS =====================
+app.get("/monthly", async (req, res) => {
+  try {
+    const data = await getRows();
+    const now = new Date();
+    const month = now.getMonth();
+    const year = now.getFullYear();
+
+    const count = data.filter((r) => {
+      const d = parseDate(r.Timestamp);
+      return d && d.getMonth() === month && d.getFullYear() === year;
+    }).length;
+
+    res.json({ total_visitors_month: count, total_rows: data.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to fetch monthly visitors" });
+  }
+});
+
+// ===================== SALESPERSON STATS =====================
+app.get("/salesperson", async (req, res) => {
+  try {
+    const { name, period } = req.query;
+    if (!name || !period) return res.status(400).json({ error: "name and period required" });
+
+    const data = await getRows();
+    const now = new Date();
+    const month = now.getMonth();
+    const year = now.getFullYear();
+    const oneWeekAgo = new Date();
+    oneWeekAgo.setDate(now.getDate() - 7);
+
+    const filtered = data.filter((r) => {
+      const d = parseDate(r.Timestamp);
+      if (!d || (r["attended by"] || "").toLowerCase() !== name.toLowerCase()) return false;
+
+      if (period === "today")
+        return d.getDate() === now.getDate() && d.getMonth() === month && d.getFullYear() === year;
+      if (period === "this_week") return d >= oneWeekAgo && d <= now;
+      if (period === "this_month") return d.getMonth() === month && d.getFullYear() === year;
+      return true;
+    });
+
+    res.json({ salesperson: name, period, customers: filtered.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to fetch salesperson data" });
+  }
+});
+
+// ===================== COMPARISON STATS =====================
+app.get("/compare", async (req, res) => {
+  try {
+    const { period } = req.query;
+    if (!period) return res.status(400).json({ error: "period required" });
+
+    const data = await getRows();
+    const now = new Date();
+    const month = now.getMonth();
+    const year = now.getFullYear();
+    const oneWeekAgo = new Date();
+    oneWeekAgo.setDate(now.getDate() - 7);
+
+    const map = {};
+    data.forEach((r) => {
+      const d = parseDate(r.Timestamp);
+      const sp = r["attended by"] || "Unknown";
+      if (!d) return;
+
+      let include = false;
+      if (period === "today")
+        include = d.getDate() === now.getDate() && d.getMonth() === month && d.getFullYear() === year;
+      else if (period === "this_week") include = d >= oneWeekAgo && d <= now;
+      else if (period === "this_month") include = d.getMonth() === month && d.getFullYear() === year;
+      else include = true;
+
+      if (include) map[sp] = (map[sp] || 0) + 1;
+    });
+
+    const results = Object.entries(map)
+      .map(([salesperson, customers]) => ({ salesperson, customers }))
+      .sort((a, b) => b.customers - a.customers);
+
+    res.json({ period, results });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to compare salespeople" });
+  }
+});
+
+// ===================== ANALYTICS =====================
 app.get("/analysis", async (req, res) => {
   try {
-    const auth = new google.auth.GoogleAuth({
-      credentials: JSON.parse(GOOGLE_SERVICE_KEY),
-      scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
-    });
+    const data = await getRows();
 
-    const sheets = google.sheets({ version: "v4", auth });
-    const result = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: "'Form responses'!A:M", // Full column coverage
-    });
-
-    const rows = result.data.values || [];
-    if (rows.length <= 1) {
-      return res.json({ message: "No data found in sheet." });
-    }
-
-    const headers = rows[0];
-    const data = rows.slice(1).map((r) => Object.fromEntries(r.map((v, i) => [headers[i], v])));
-
-    // Helper function for frequency counts
     const countBy = (key) => {
       const counts = {};
-      data.forEach((row) => {
-        const val = (row[key] || "Unknown").trim();
+      data.forEach((r) => {
+        const val = (r[key] || "Unknown").trim();
         counts[val] = (counts[val] || 0) + 1;
       });
       return Object.entries(counts)
@@ -87,8 +181,7 @@ app.get("/analysis", async (req, res) => {
         .map(([label, count]) => ({ label, count }));
     };
 
-    // Build analytics response
-    const response = {
+    res.json({
       total_records: data.length,
       top_sources: countBy("How did you come to know about us? "),
       top_requirements: countBy("Requirements"),
@@ -103,24 +196,20 @@ app.get("/analysis", async (req, res) => {
           remark: r["Remarks"],
         }))
         .filter((r) => r.remark && r.remark.trim().length > 0),
-    };
-
-    res.json(response);
-  } catch (error) {
-    console.error("Sheets API error:", error.response?.data || error.message);
-    res.status(500).json({ error: "Failed to analyze data" });
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to fetch analytics" });
   }
 });
 
-// ===================== HEALTH ENDPOINT =====================
+// ===================== HEALTH =====================
 app.get("/health", (req, res) => {
-  res.send("✅ Forestscape API is healthy. Endpoints: /visitors, /analysis");
+  res.send("✅ Forestscape API running fine. Endpoints: /visitors, /weekly, /monthly, /salesperson, /compare, /analysis");
 });
 
-// ===================== ROOT ENDPOINT =====================
 app.get("/", (req, res) => {
-  res.send("🌿 Forestscape API is live! Endpoints: /health, /visitors, /analysis");
+  res.send("🌿 Forestscape API is live! Endpoints: /health, /visitors, /weekly, /monthly, /salesperson, /compare, /analysis");
 });
 
-// ===================== START SERVER =====================
-app.listen(PORT, () => console.log(`✅ Server started on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
