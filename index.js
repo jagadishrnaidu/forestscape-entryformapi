@@ -170,6 +170,11 @@ app.get("/analysis", async (req, res) => {
   try {
     const data = await getRows();
 
+    const limit = Math.max(
+      0,
+      Math.min(Number.parseInt(req.query.limit, 10) || 50, data.length)
+    );
+
     const countBy = (key) => {
       const counts = {};
       data.forEach((r) => {
@@ -181,6 +186,18 @@ app.get("/analysis", async (req, res) => {
         .map(([label, count]) => ({ label, count }));
     };
 
+    const names = data.map((r) => r["Name"]).filter(Boolean);
+    const remarks = data
+      .map((r) => ({
+        name: r["Name"],
+        attended_by: r["attended by"],
+        remark: r["Remarks"],
+      }))
+      .filter((r) => r.remark && r.remark.trim().length > 0);
+
+    const limitedNames = names.slice(0, limit);
+    const limitedRemarks = remarks.slice(0, limit);
+
     res.json({
       total_records: data.length,
       top_sources: countBy("How did you come to know about us? "),
@@ -188,14 +205,13 @@ app.get("/analysis", async (req, res) => {
       top_configurations: countBy("Configuration"),
       top_industries: countBy("I am working in"),
       income_distribution: countBy("Current annual income"),
-      all_names: data.map((r) => r["Name"]).filter(Boolean),
-      remarks: data
-        .map((r) => ({
-          name: r["Name"],
-          attended_by: r["attended by"],
-          remark: r["Remarks"],
-        }))
-        .filter((r) => r.remark && r.remark.trim().length > 0),
+      all_names: limitedNames,
+      all_names_total: names.length,
+      all_names_truncated: names.length > limitedNames.length,
+      remarks: limitedRemarks,
+      remarks_total: remarks.length,
+      remarks_truncated: remarks.length > limitedRemarks.length,
+      limit_applied: limit,
     });
   } catch (e) {
     console.error(e);
